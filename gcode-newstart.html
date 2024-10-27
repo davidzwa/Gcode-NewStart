@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>G-code Layer Restart Generator</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="app">
+        <div class="min-h-screen bg-gray-100 py-8 px-4">
+            <div class="max-w-3xl mx-auto bg-white rounded-lg shadow-md p-6">
+                <h1 class="text-2xl font-bold mb-6 text-gray-800">G-code Layer Restart Generator</h1>
+                
+                <!-- File Upload -->
+                <div class="mb-6">
+                    <label class="block text-gray-700 mb-2">Select G-code File</label>
+                    <input 
+                        type="file" 
+                        accept=".gcode"
+                        @change="handleFileSelect"
+                        class="w-full p-2 border rounded"
+                    >
+                    <p v-if="slicerType !== 'Unknown'" class="mt-2 text-sm text-gray-600">
+                        Detected Slicer: {{ slicerType }}
+                    </p>
+                </div>
+                
+                <!-- Temperature Settings -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <div>
+                        <label class="block text-gray-700 mb-2">Nozzle Temperature (°C)</label>
+                        <input 
+                            v-model="nozzleTemp"
+                            type="number"
+                            class="w-full p-2 border rounded"
+                        >
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">Bed Temperature (°C)</label>
+                        <input 
+                            v-model="bedTemp"
+                            type="number"
+                            class="w-full p-2 border rounded"
+                        >
+                    </div>
+                </div>
+                
+                <!-- Fan Speed and Pre-purge -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <div>
+                        <label class="block text-gray-700 mb-2">Fan Speed (%)</label>
+                        <input 
+                            v-model="fanSpeed"
+                            type="number"
+                            min="0"
+                            max="100"
+                            class="w-full p-2 border rounded"
+                        >
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">Pre-purge Amount (mm)</label>
+                        <input 
+                            v-model="prePurgeAmount"
+                            type="number"
+                            class="w-full p-2 border rounded"
+                        >
+                    </div>
+                </div>
+                
+                <!-- Bed Mesh Toggle -->
+                <div class="mb-6">
+                    <label class="flex items-center">
+                        <input 
+                            v-model="loadBedMesh"
+                            type="checkbox"
+                            class="mr-2"
+                        >
+                        <span class="text-gray-700">Load bed mesh from memory</span>
+                    </label>
+                </div>
+                
+                <!-- Layer Selection -->
+                <div class="mb-6">
+                    <label class="block text-gray-700 mb-2">Select Layer to Restart From</label>
+                    <select 
+                        v-model="selectedLayer"
+                        class="w-full p-2 border rounded"
+                        :disabled="!layers.length"
+                    >
+                        <option value="">Select a layer...</option>
+                        <option 
+                            v-for="layer in layers" 
+                            :key="layer.layer"
+                            :value="layer.layer"
+                        >
+                            Layer {{ layer.layer }} (Z = {{ layer.zHeight.toFixed(2) }} mm)
+                        </option>
+                    </select>
+                </div>
+                
+                <!-- Generate Button -->
+                <button 
+                    @click="generateModifiedGcode"
+                    :disabled="!file || !selectedLayer"
+                    class="w-full bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                    Generate Modified G-code
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref } = Vue
+
+        createApp({
+            setup() {
+                const file = ref(null)
+                const fileContent = ref('')
+                const nozzleTemp = ref(200)
+                const bedTemp = ref(60)
+                const fanSpeed = ref(100)
+                const loadBedMesh = ref(true)
+                const prePurgeAmount = ref(5)
+                const selectedLayer = ref(null)
+                const layers = ref([])
+                const slicerType = ref('Unknown')
+
+                const detectSlicerType = (content) => {
+                    const lines = content.split('\n').slice(0, 50)
+                    for (const line of lines) {
+                        const lowerLine = line.toLowerCase()
+                        if (lowerLine.includes('cura')) return 'Cura'
+                        if (lowerLine.includes('orcaslicer')) return 'Orca'
+                        if (lowerLine.includes('prusaslicer')) return 'Prusa'
+                    }
+                    return 'Unknown'
+                }
+
+                const getLayerInfo = (content) => {
+                    const lines = content.split('\n')
+                    const layerInfo = []
+                    
+                    if (slicerType.value === 'Cura') {
+                        let zHeight = null
+                        for (const line of lines) {
+                            if (line.startsWith(';LAYER:')) {
+                                const currentLayer = parseInt(line.split(':')[1])
+                                if (zHeight !== null) {
+                                    layerInfo.push({
+                                        layer: currentLayer,
+                                        zHeight
+                                    })
+                                }
+                            } else if (line.startsWith('G0') || line.startsWith('G1')) {
+                                const parts = line.split('Z')
+                                if (parts.length > 1) {
+                                    try {
+                                        zHeight = parseFloat(parts[1].split(' ')[0])
+                                    } catch (error) {
+                                        console.error('Error parsing Z height:', error)
+                                    }
+                                }
+                            }
+                        }
+                    } else if (['Orca', 'Prusa'].includes(slicerType.value)) {
+                        let currentLayer = 0
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i]
+                            if (line.includes(';LAYER_CHANGE')) {
+                                currentLayer++
+                            } else if (line.includes(';Z:')) {
+                                const parts = line.split(':')
+                                if (parts.length > 1) {
+                                    try {
+                                        const zHeight = parseFloat(parts[1].split(' ')[0])
+                                        layerInfo.push({
+                                            layer: currentLayer,
+                                            zHeight
+                                        })
+                                    } catch (error) {
+                                        console.error('Error parsing Z height:', error)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    return layerInfo
+                }
+
+const extractLayerContent = (content, selectedLayer, slicerType, layerZHeight) => {
+    const lines = content.split('\n');
+    let extractedContent = [];
+    let startCapturing = false;
+    let currentLayer = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Determine when to start capturing based on slicer type
+        if (slicerType === 'Cura') {
+            if (line.startsWith(`;LAYER:${selectedLayer}`)) {
+                startCapturing = true;
+                extractedContent.push(line);
+                continue;
+            }
+        } else if (['Orca', 'Prusa'].includes(slicerType)) {
+            if (line.includes(';LAYER_CHANGE')) {
+                currentLayer++;
+            }
+            if (currentLayer === selectedLayer && line.includes(`;Z:${layerZHeight}`)) {
+                startCapturing = true;
+                extractedContent.push(line);
+                continue;
+            }
+        }
+        
+        // Once we start capturing, keep capturing everything until the end
+        if (startCapturing) {
+            extractedContent.push(line);
+        }
+    }
+    
+    // Safety check - if nothing was captured, return empty array
+    if (extractedContent.length === 0) {
+        console.warn('No content was captured for the selected layer');
+        return [];
+    }
+    
+    return extractedContent;
+}
+
+                const generateModifiedGcode = () => {
+                    if (!file.value || !selectedLayer.value) {
+                        alert('Please select a file and layer first')
+                        return
+                    }
+
+                    const layerInfo = layers.value.find(l => l.layer === selectedLayer.value)
+                    if (!layerInfo) return
+
+                    const newGcode = []
+                    
+                    // Initial setup commands
+                    newGcode.push('G92 E0 ; Reset Extruder')
+                    newGcode.push('M83 ; Set extruder to Relative')
+                    
+                    // Temperature commands
+                    newGcode.push(`M104 S${nozzleTemp.value} ; Start preheating hotend`)
+                    newGcode.push(`M140 S${bedTemp.value} ; Start preheating bed`)
+                    
+                    // Bed mesh and positioning
+                    if (loadBedMesh.value) {
+                        newGcode.push('M420 S1 ; Load bed mesh from memory')
+                    }
+                    newGcode.push(`G0 Z${layerInfo.zHeight + 5} ; Go 5mm above selected layer number`)
+                    
+                    // Wait for temperatures
+                    newGcode.push(`M190 S${bedTemp.value} ; Set bed temperature`)
+                    newGcode.push(`M109 S${nozzleTemp.value} ; Set nozzle temperature`)
+                    
+                    // Fan speed
+                    const fanSpeedScaled = Math.floor(2.55 * fanSpeed.value)
+                    newGcode.push(`M106 S${fanSpeedScaled} ; Set fan speed`)
+                    
+                    // Final positioning and purge
+                    newGcode.push(`G0 Z${layerInfo.zHeight} ; Drop down to selected layer number`)
+                    newGcode.push(`G1 F3600 E${prePurgeAmount.value} ; Pre-purge extruder`)
+                    
+                    // Set extruder mode based on slicer
+                    if (slicerType.value === 'Cura') {
+                        newGcode.push('M82 ; Set Extruder to Absolute')
+                    } else {
+                        newGcode.push('M83 ; Set extruder to Relative')
+                    }
+
+                    // Extract and append the remaining G-code from the selected layer
+                    const remainingContent = extractLayerContent(
+                        fileContent.value,
+                        selectedLayer.value,
+                        slicerType.value,
+                        layerInfo.zHeight
+                    )
+                    newGcode.push(...remainingContent)
+                    
+                    // Create download link
+                    const blob = new Blob([newGcode.join('\n')], { type: 'text/plain' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = file.value.name.replace('.gcode', `-NEWSTART-LAYER${selectedLayer.value}.gcode`)
+                    a.click()
+                    URL.revokeObjectURL(url)
+                }
+
+                const handleFileSelect = (event) => {
+                    const selectedFile = event.target.files[0]
+                    if (!selectedFile) return
+                    
+                    file.value = selectedFile
+                    const reader = new FileReader()
+                    
+                    reader.onload = (e) => {
+                        const content = e.target.result
+                        fileContent.value = content
+                        slicerType.value = detectSlicerType(content)
+                        layers.value = getLayerInfo(content)
+                    }
+                    
+                    reader.readAsText(selectedFile)
+                }
+
+                return {
+                    file,
+                    nozzleTemp,
+                    bedTemp,
+                    fanSpeed,
+                    loadBedMesh,
+                    prePurgeAmount,
+                    selectedLayer,
+                    layers,
+                    slicerType,
+                    handleFileSelect,
+                    generateModifiedGcode
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
